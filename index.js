@@ -1,8 +1,8 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
+const pino = require('pino');
 const dotenv = require('dotenv');
-const fs = require('fs');
 
 dotenv.config();
 
@@ -11,71 +11,69 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+let sock;
+
 // Função para iniciar a conexão com o WhatsApp
 async function connectToWhatsApp() {
-    // O Coolify pode usar um volume persistente para armazenar o estado da sessão
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info');
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         auth: state,
         printQRInTerminal: true,
+        logger: pino({ level: 'silent' }) // Reduz o excesso de logs
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
-            // Reconnectar se não for um loggout
+            console.log('Conexão fechada:', lastDisconnect.error, ', reconectando:', shouldReconnect);
             if (shouldReconnect) {
-                connectToWhatsApp();
+                setTimeout(connectToWhatsApp, 5000); // Tenta reconectar após 5 segundos
             }
         } else if (connection === 'open') {
-            console.log('opened connection');
+            console.log('Conexão aberta com sucesso!');
         }
         
         if (qr) {
-            console.log('QR Code gerado. Escaneie com seu celular:');
-            // Aqui você pode salvar o QR em um arquivo ou enviar para um webhook
-            // Para o Coolify, o ideal é que o usuário escaneie o QR via log ou um endpoint
+            console.log('QR Code gerado. Escaneie com seu celular.');
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
-
-    return sock;
 }
 
-let sock;
-connectToWhatsApp().then(s => {
-    sock = s;
-}).catch(err => console.error("Erro ao conectar ao WhatsApp:", err));
+// Inicia a conexão
+connectToWhatsApp().catch(err => console.error("Erro inicial ao conectar ao WhatsApp:", err));
 
+// Rota principal para Health Check do Coolify
+app.get('/', (req, res) => {
+    res.status(200).json({ status: 'ok', message: 'WhatsApp API is running.' });
+});
 
 // Endpoint para enviar mensagem
 app.post('/send-message', async (req, res) => {
-    const { to, message } = req.body; // 'to' deve ser no formato '5511999999999@s.whatsapp.net'
+    const { to, message } = req.body;
 
-    if (!sock || !sock.user) {
-        return res.status(503).json({ error: 'WhatsApp not connected or ready.' });
+    if (!sock || sock.user?.id === undefined) {
+        return res.status(503).json({ error: 'WhatsApp não está conectado ou pronto.' });
     }
 
     if (!to || !message) {
-        return res.status(400).json({ error: 'Missing "to" or "message" in request body.' });
+        return res.status(400).json({ error: 'Faltando "to" ou "message" no corpo da requisição.' });
     }
 
     try {
-        // O número deve ser no formato '5511999999999@s.whatsapp.net'
-        const jid = to.includes('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
-        const result = await sock.sendMessage(jid, { text: message });
-        res.json({ success: true, result });
+        const jid = to.includes('@s.whatsapp.net') ? to : `${to.replace(/\D/g, '')}@s.whatsapp.net`;
+        await sock.sendMessage(jid, { text: message });
+        res.json({ success: true });
     } catch (error) {
-        console.error('Error sending message:', error);
-        res.status(500).json({ error: 'Failed to send message.' });
+        console.error('Erro ao enviar mensagem:', error);
+        res.status(500).json({ error: 'Falha ao enviar mensagem.' });
     }
 });
 
-// Endpoint de saúde (Health Check)
+// Endpoint de status
 app.get('/status', (req, res) => {
     res.json({ 
         status: sock && sock.user ? 'connected' : 'disconnected',
@@ -84,5 +82,14 @@ app.get('/status', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`WhatsApp API running on port ${PORT}`);
+    console.log(`WhatsApp API rodando na porta ${PORT}`);
+});
+
+// Mantém o processo vivo em caso de erros não tratados
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception thrown:', error);
 });
