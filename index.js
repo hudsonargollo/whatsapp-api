@@ -3,7 +3,8 @@ const { Boom } = require('@hapi/boom');
 const express = require('express');
 const pino = require('pino');
 const dotenv = require('dotenv');
-const qrcode = require('qrcode-terminal'); // NOVO: Módulo para gerar QR Code no terminal
+const qrcode = require('qrcode'); // Para gerar Base64
+const qrcodeTerminal = require('qrcode-terminal'); // Para logs
 
 dotenv.config();
 
@@ -13,6 +14,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 let sock;
+let qrCodeData = null; // Variável para armazenar o QR Code
 
 // Função para iniciar a conexão com o WhatsApp
 async function connectToWhatsApp() {
@@ -20,26 +22,31 @@ async function connectToWhatsApp() {
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // Desabilita a impressão automática
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' })
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
+        
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Conexão fechada:', lastDisconnect.error, ', reconectando:', shouldReconnect);
+            qrCodeData = null; // Limpa o QR Code ao desconectar
             if (shouldReconnect) {
                 setTimeout(connectToWhatsApp, 5000);
             }
         } else if (connection === 'open') {
             console.log('Conexão aberta com sucesso!');
+            qrCodeData = null; // Limpa o QR Code ao conectar
         }
         
         if (qr) {
-            // NOVO: Imprime o QR Code usando o qrcode-terminal
-            qrcode.generate(qr, { small: true });
-            console.log('QR Code gerado. Escaneie com seu celular.');
+            // Armazena o QR Code para o endpoint /qr
+            qrCodeData = qr;
+            // Imprime no log para facilitar a visualização inicial
+            qrcodeTerminal.generate(qr, { small: true });
+            console.log('QR Code gerado. Acesse /qr para ver a imagem.');
         }
     });
 
@@ -49,9 +56,32 @@ async function connectToWhatsApp() {
 // Inicia a conexão
 connectToWhatsApp().catch(err => console.error("Erro inicial ao conectar ao WhatsApp:", err));
 
-// Rota principal para Health Check do Coolify
+// Rota para Health Check do Coolify
 app.get('/', (req, res) => {
-    res.status(200).json({ status: 'ok', message: 'WhatsApp API is running.' });
+    res.status(200).json({ 
+        status: sock && sock.user ? 'connected' : 'disconnected',
+        message: 'WhatsApp API is running.' 
+    });
+});
+
+// NOVO ENDPOINT: Exibe o QR Code como imagem
+app.get('/qr', async (req, res) => {
+    if (sock && sock.user) {
+        return res.status(200).json({ status: 'connected', message: 'Already connected.' });
+    }
+    
+    if (qrCodeData) {
+        try {
+            const qrImage = await qrcode.toDataURL(qrCodeData);
+            // Retorna a imagem Base64
+            return res.status(200).json({ status: 'scan_required', qr_code: qrImage });
+        } catch (e) {
+            console.error('Erro ao gerar QR Code:', e);
+            return res.status(500).json({ status: 'error', message: 'Failed to generate QR Code image.' });
+        }
+    }
+    
+    res.status(200).json({ status: 'connecting', message: 'Waiting for QR Code generation.' });
 });
 
 // Endpoint para enviar mensagem
