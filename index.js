@@ -3,6 +3,7 @@ const { Boom } = require('@hapi/boom');
 const express = require('express');
 const pino = require('pino');
 const dotenv = require('dotenv');
+const qrcode = require('qrcode-terminal'); // NOVO: Módulo para gerar QR Code no terminal
 
 dotenv.config();
 
@@ -19,8 +20,8 @@ async function connectToWhatsApp() {
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' }) // Reduz o excesso de logs
+        printQRInTerminal: false, // Desabilita a impressão automática
+        logger: pino({ level: 'silent' })
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -29,13 +30,15 @@ async function connectToWhatsApp() {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Conexão fechada:', lastDisconnect.error, ', reconectando:', shouldReconnect);
             if (shouldReconnect) {
-                setTimeout(connectToWhatsApp, 5000); // Tenta reconectar após 5 segundos
+                setTimeout(connectToWhatsApp, 5000);
             }
         } else if (connection === 'open') {
             console.log('Conexão aberta com sucesso!');
         }
         
         if (qr) {
+            // NOVO: Imprime o QR Code usando o qrcode-terminal
+            qrcode.generate(qr, { small: true });
             console.log('QR Code gerado. Escaneie com seu celular.');
         }
     });
